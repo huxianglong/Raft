@@ -14,3 +14,6 @@
 # Do not check in build results
 server/server
 client/client
+
+# ignore .idea
+.idea

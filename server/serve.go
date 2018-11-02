@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 	"log"
-	rand "math/rand"
+	"math/rand"
 	"net"
 	"time"
 
-	context "golang.org/x/net/context"
+	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 
 	"github.com/nyu-distributed-systems-fa18/starter-code-lab2/pb"
@@ -102,8 +102,29 @@ func connectToPeer(peer string) (pb.RaftClient, error) {
 	return pb.NewRaftClient(conn), nil
 }
 
+type Role int
+
+const (
+	CANDIDATE Role = 0
+	FOLLOWER  Role = 1
+	LEADER    Role = 2
+)
+
 // The main service loop. All modifications to the KV store are run through here.
 func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
+	// persistent server attributes
+	var currentTerm int64 = 0
+	var votedFor string = ""
+	//var logs []pb.Entry
+	// volatile server attributes
+	//var commitIndex int64 = 0
+	//var lastApplied int64 = 0
+	var lastLogTerm int64 = 0
+	var lastLogIndex int64 = 0
+	var role Role = CANDIDATE
+	var voteCount int64 = 0 // received votes counted
+	var majority int64 = 0 // majority votes
+	var headCount int64 = 1 // raft servers counted, self included
 	raft := Raft{AppendChan: make(chan AppendEntriesInput), VoteChan: make(chan VoteInput)}
 	// Start in a Go routine so it doesn't affect us.
 	go RunRaftServer(&raft, port)
@@ -115,7 +136,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 		if err != nil {
 			log.Fatalf("Failed to connect to GRPC server %v", err)
 		}
-
+		headCount++
 		peerClients[peer] = client
 		log.Printf("Connected to %v", peer)
 	}
@@ -143,10 +164,15 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 		case <-timer.C:
 			// The timer went off.
 			log.Printf("Timeout")
+			// voted for myself first
+			votedFor = id
+			voteCount = 1
 			for p, c := range peerClients {
 				// Send in parallel so we don't wait for each client.
 				go func(c pb.RaftClient, p string) {
+					// this tells the other raft servers about the vote request
 					ret, err := c.RequestVote(context.Background(), &pb.RequestVoteArgs{Term: 1, CandidateID: id})
+					// this receives the response from others
 					voteResponseChan <- VoteResponse{ret: ret, err: err, peer: p}
 				}(c, p)
 			}
@@ -169,7 +195,17 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			// We received a RequestVote RPC from a raft peer
 			// TODO: Fix this.
 			log.Printf("Received vote request from %v", vr.arg.CandidateID)
-			vr.response <- pb.RequestVoteRet{Term: 1, VoteGranted: false}
+			if vr.arg.Term < currentTerm {
+				vr.response <- pb.RequestVoteRet{Term: vr.arg.Term, VoteGranted: false}
+			} else {
+				if (votedFor == "" || votedFor == vr.arg.CandidateID) && (vr.arg.LasLogTerm > lastLogTerm || vr.arg.LasLogTerm == lastLogTerm && vr.arg.LastLogIndex >= lastLogIndex) {
+					vr.response <- pb.RequestVoteRet{Term: vr.arg.Term, VoteGranted: true}
+					// change the votedFor
+					votedFor = vr.arg.CandidateID
+				} else {
+					vr.response <- pb.RequestVoteRet{Term: vr.arg.Term, VoteGranted: false}
+				}
+			}
 		case vr := <-voteResponseChan:
 			// We received a response to a previou vote request.
 			// TODO: Fix this
@@ -179,6 +215,11 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			} else {
 				log.Printf("Got response to vote request from %v", vr.peer)
 				log.Printf("Peers %s granted %v term %v", vr.peer, vr.ret.VoteGranted, vr.ret.Term)
+			}
+			// check whether there are enough to be voted
+			if vr.ret.VoteGranted {
+				voteCount++
+				if voteCount >
 			}
 		case ar := <-appendResponseChan:
 			// We received a response to a previous AppendEntries RPC call
