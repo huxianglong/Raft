@@ -46,15 +46,15 @@ func (r *Raft) RequestVote(ctx context.Context, arg *pb.RequestVoteArgs) (*pb.Re
 }
 
 // Compute a random duration in milliseconds
-func randomDuration(r *rand.Rand) time.Duration {
+func randomDuration(r *rand.Rand, low int, up int) time.Duration {
 	// Constant
-	const DurationMax = 4000
-	const DurationMin = 1000
+	DurationMax := up
+	DurationMin := low
 	return time.Duration(r.Intn(DurationMax-DurationMin)+DurationMin) * time.Millisecond
 }
 
 // Restart the supplied timer using a random timeout based on function above
-func restartTimer(timer *time.Timer, r *rand.Rand) {
+func restartTimer(timer *time.Timer, r *rand.Rand, low int, up int) {
 	stopped := timer.Stop()
 	// If stopped is false that means someone stopped before us, which could be due to the timer going off before this,
 	// in which case we just drain notifications.
@@ -65,7 +65,7 @@ func restartTimer(timer *time.Timer, r *rand.Rand) {
 		}
 
 	}
-	timer.Reset(randomDuration(r))
+	timer.Reset(randomDuration(r, low, up))
 }
 
 // Launch a GRPC service for this Raft peer.
@@ -115,15 +115,15 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 	// persistent server attributes
 	var currentTerm int64 = 0
 	var votedFor string = ""
-	//var logs []pb.Entry
+	var logs []pb.Entry
 	// volatile server attributes
 	//var commitIndex int64 = 0
 	//var lastApplied int64 = 0
 	var lastLogTerm int64 = 0
 	var lastLogIndex int64 = 0
-	var role Role = CANDIDATE
+	var role = FOLLOWER
 	var voteCount int64 = 0 // received votes counted
-	var majority int64 = 0 // majority votes
+	var majority int64 = 0  // majority votes
 	var headCount int64 = 1 // raft servers counted, self included
 	raft := Raft{AppendChan: make(chan AppendEntriesInput), VoteChan: make(chan VoteInput)}
 	// Start in a Go routine so it doesn't affect us.
@@ -140,6 +140,8 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 		peerClients[peer] = client
 		log.Printf("Connected to %v", peer)
 	}
+	// count head
+	majority = headCount/2 + 1
 
 	type AppendResponse struct {
 		ret  *pb.AppendEntriesRet
@@ -156,41 +158,88 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 	voteResponseChan := make(chan VoteResponse)
 
 	// Create a timer and start running it
-	timer := time.NewTimer(randomDuration(r))
+	timer := time.NewTimer(randomDuration(r, 1000, 4000))
+
+	// heartbeat timer
+	timerHeartBeat := time.NewTimer(randomDuration(r, 1000, 2000))
 
 	// Run forever handling inputs from various channels
 	for {
 		select {
+		// send heartbeat periodically
+		case <-timerHeartBeat.C:
+			if role == LEADER {
+				for p, c := range peerClients {
+					// Send in parallel so we don't wait for each client.
+					go func(c pb.RaftClient, p string) {
+						// send heartbeats
+						ret, err := c.AppendEntries(context.Background(), &pb.AppendEntriesArgs{Term: currentTerm, LeaderID: id})
+						// get response
+						appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
+					}(c, p)
+				}
+			}
+			restartTimer(timerHeartBeat, r, 1000, 2000)
 		case <-timer.C:
 			// The timer went off.
 			log.Printf("Timeout")
 			// voted for myself first
 			votedFor = id
 			voteCount = 1
+			// increment current term
+			//if role != CANDIDATE {
+			currentTerm++
+			//}
+			// turn to candidate state
+			role = CANDIDATE
 			for p, c := range peerClients {
 				// Send in parallel so we don't wait for each client.
 				go func(c pb.RaftClient, p string) {
 					// this tells the other raft servers about the vote request
-					ret, err := c.RequestVote(context.Background(), &pb.RequestVoteArgs{Term: 1, CandidateID: id})
+					ret, err := c.RequestVote(context.Background(), &pb.RequestVoteArgs{Term: currentTerm, CandidateID: id})
 					// this receives the response from others
 					voteResponseChan <- VoteResponse{ret: ret, err: err, peer: p}
 				}(c, p)
 			}
 			// This will also take care of any pesky timeouts that happened while processing the operation.
-			restartTimer(timer, r)
+			restartTimer(timer, r, 1000, 4000)
 		case op := <-s.C:
 			// We received an operation from a client
 			// TODO: Figure out if you can actually handle the request here. If not use the Redirect result to send the
 			// client elsewhere.
 			// TODO: Use Raft to make sure it is safe to actually run the command.
+			// if this is the leader, add it to the log
+			log.Printf("Request received %v, command %v", id, op.command)
+			if role == LEADER {
+				log.Printf("Entry added to the leader %v, command %v", id, op.command)
+				logs = append(logs, pb.Entry{Term:currentTerm, Index:lastLogIndex + 1, Cmd:&op.command})
+				lastLogIndex++
+				//for p, c := range peerClients {
+					// Send in parallel so we don't wait for each client.
+					//go func(c pb.RaftClient, p string) {
+						// send heartbeats
+						// TODO: need refinement
+						//ret, err := c.AppendEntries(context.Background(), &pb.AppendEntriesArgs{Term: currentTerm, LeaderID: id, PrevLogIndex:lastLogIndex, PrevLogTerm:lastLogTerm, })
+						// get response
+						//appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
+					//}(c, p)
+				//}
+			}
+			// This command commits the operation
 			s.HandleCommand(op)
 		case ae := <-raft.AppendChan:
 			// We received an AppendEntries request from a Raft peer
 			// TODO figure out what to do here, what we do is entirely wrong.
+			if ae.arg.Term < currentTerm {
+				ae.response <- pb.AppendEntriesRet{Term: ae.arg.Term, Success: false}
+			}
+			role = FOLLOWER
+			currentTerm = ae.arg.Term
+			votedFor = ""
 			log.Printf("Received append entry from %v", ae.arg.LeaderID)
-			ae.response <- pb.AppendEntriesRet{Term: 1, Success: true}
+			ae.response <- pb.AppendEntriesRet{Term: ae.arg.Term, Success: true}
 			// This will also take care of any pesky timeouts that happened while processing the operation.
-			restartTimer(timer, r)
+			restartTimer(timer, r, 1000, 4000)
 		case vr := <-raft.VoteChan:
 			// We received a RequestVote RPC from a raft peer
 			// TODO: Fix this.
@@ -217,13 +266,27 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				log.Printf("Peers %s granted %v term %v", vr.peer, vr.ret.VoteGranted, vr.ret.Term)
 			}
 			// check whether there are enough to be voted
-			if vr.ret.VoteGranted {
+			if vr.ret.VoteGranted && vr.ret.Term == currentTerm {
 				voteCount++
-				if voteCount >
+				// get elected
+				if voteCount >= majority {
+					log.Printf("Elected %v, term is %v", id, currentTerm)
+					role = LEADER
+					// send heartbeat
+					for p, c := range peerClients {
+						// Send in parallel so we don't wait for each client.
+						go func(c pb.RaftClient, p string) {
+							// send heartbeats
+							ret, err := c.AppendEntries(context.Background(), &pb.AppendEntriesArgs{Term: currentTerm, LeaderID: id})
+							// get response
+							appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
+						}(c, p)
+					}
+				}
 			}
 		case ar := <-appendResponseChan:
 			// We received a response to a previous AppendEntries RPC call
-			log.Printf("Got append entries response from %v", ar.peer)
+			log.Printf("Got append entries response from %v, %v", ar.peer, ar.ret.Success)
 		}
 	}
 	log.Printf("Strange to arrive here")
