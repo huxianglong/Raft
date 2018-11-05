@@ -126,3 +126,22 @@ func (s *KVStore) HandleCommand(op InputChannelType) {
 		log.Fatalf("Unrecognized operation %v", c)
 	}
 }
+
+func (s *KVStore) CommitLog (entry *pb.Entry) {
+	switch c := entry.Cmd; c.Operation{
+	case pb.Op_GET:
+		arg := c.GetGet()
+		s.GetInternal(arg.Key)
+	case pb.Op_SET:
+		arg := c.GetSet()
+		s.SetInternal(arg.Key, arg.Value)
+	case pb.Op_CLEAR:
+		s.ClearInternal()
+	case pb.Op_CAS:
+		arg := c.GetCas()
+		s.CasInternal(arg.Kv.Key, arg.Kv.Value, arg.Value.Value)
+	default:
+		// Sending a blank response to just free things up, but we don't know how to make progress here.
+		log.Fatalf("Unrecognized operation %v", c)
+	}
+}
