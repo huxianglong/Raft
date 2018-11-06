@@ -3,19 +3,32 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/nyu-distributed-systems-fa18/starter-code-lab2/pb"
+	"golang.org/x/net/context"
+	"google.golang.org/grpc"
 	"log"
 	"os"
-
-	context "golang.org/x/net/context"
-	"google.golang.org/grpc"
-
-	"github.com/nyu-distributed-systems-fa18/starter-code-lab2/pb"
 )
 
 func usage() {
 	fmt.Printf("Usage %s <endpoint>\n", os.Args[0])
 	flag.PrintDefaults()
 }
+
+//func reconnect(res *pb.Result, kvc *pb.kvStoreClient) {
+//	if reflect.TypeOf(res.Result).String() == "*pb.Result_Redirect" {
+//		endpoint := res.GetRedirect().Server
+//		log.Printf("Connecting to %v", endpoint)
+//	// Connect to the server. We use WithInsecure since we do not configure https in this class.
+//	conn, err := grpc.Dial(endpoint, grpc.WithInsecure())
+//	//Ensure connection did not fail.
+//	if err != nil {
+//		log.Fatalf("Failed to dial GRPC server %v", err)
+//	}
+//	log.Printf("Connected")
+//		kvc = pb.NewKvStoreClient(conn)
+//	}
+//}
 
 func main() {
 	// Take endpoint as input

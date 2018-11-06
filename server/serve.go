@@ -222,10 +222,15 @@ func followerUpdate(term *int64, currentTerm *int64, role *Role, votedFor *strin
 
 // The main service loop. All modifications to the KV store are run through here.
 func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
+	// heartbeat lower and upper bound
+	lbHeartBeat :=  100
+	ubHeartBeat :=  200
+	lbTimer :=  1000
+	ubTimer :=  2000
 	// persistent server attributes
 	var currentTerm int64 = 0
 	var votedFor string = ""
-	//var leaderID string = ""
+	var leaderID string = ""
 	var logs []*pb.Entry
 	matchIndex := make(map[string]int64)
 	nextIndex := make(map[string]int64)
@@ -247,9 +252,9 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 	voteResponseChan := make(chan VoteResponse)
 	peerClients := make(map[string]pb.RaftClient)
 	// Create a timer and start running it
-	timer := time.NewTimer(randomDuration(r, 1000, 4000))
+	timer := time.NewTimer(randomDuration(r, lbTimer, ubTimer))
 	// heartbeat timer
-	timerHeartBeat := time.NewTimer(randomDuration(r, 1000, 2000))
+	timerHeartBeat := time.NewTimer(randomDuration(r, lbHeartBeat, ubHeartBeat))
 	raft := Raft{AppendChan: make(chan AppendEntriesInput), VoteChan: make(chan VoteInput)}
 
 	// Start in a Go routine so it doesn't affect us.
@@ -275,7 +280,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 		// what a leader should do
 		if role == LEADER {
 			// check nextIndex
-			log.Printf("nextIndex %v", nextIndex)
+			log.Printf("In leader: nextIndex %v", nextIndex)
 			// send hearbeats
 			sendHeartBeat(peerClients, &logs, &prevLogIndex, &prevLogTerm, &currentTerm,
 				&id, &nextIndex, &commitIndex, &appendResponseChan)
@@ -312,6 +317,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			if role == LEADER {
 				sendHeartBeat(peerClients, &logs, &prevLogIndex, &prevLogTerm, &currentTerm,
 					&id, &nextIndex, &commitIndex, &appendResponseChan)
+				restartTimer(timerHeartBeat, r, lbHeartBeat, ubHeartBeat)
 			} else {
 				timerHeartBeat.Stop()
 			}
@@ -346,7 +352,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				}(c, p)
 			}
 			// This will also take care of any pesky timeouts that happened while processing the operation.
-			restartTimer(timer, r, 1000, 4000)
+			restartTimer(timer, r, lbTimer, ubTimer)
 		case op = <-s.C:
 			// We received an operation from a client
 			// TODO: Figure out if you can actually handle the request here. If not use the Redirect result to send the
@@ -383,14 +389,19 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 						appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p, op: op}
 					}(c, p)
 				}
+			} else {
+				// send redirect information
+				log.Printf("In client rquest, %v is redirected to leader %v", op.command, leaderID)
+				op.response <- pb.Result{Result:&pb.Result_Redirect{Redirect:&pb.Redirect{Server:leaderID}}}
 			}
 		case ae := <-raft.AppendChan:
 			// We received an AppendEntries request from a Raft peer
 			// TODO figure out what to do here, what we do is entirely wrong.
-			// things that have to be done anyway
 			//log.Printf("AppendEntries request from leader %v received", ae.arg.LeaderID)
+			// things that have to be done anyway
 			if ae.arg.Term > currentTerm {
 				followerUpdate(&ae.arg.Term, &currentTerm, &role, &votedFor, &voteCount)
+				leaderID = ae.arg.LeaderID
 				//log.Printf("AppendEntries request from new leader %v received", ae.arg.LeaderID)
 			}
 			// reject if term is smaller, outdated
@@ -405,8 +416,8 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				continue
 			}
 			// This will also take care of any pesky timeouts that happened while processing the operation.
-			restartTimer(timer, r, 1000, 4000)
-			fmt.Printf("In append: prevLogIndex %v, length of logs %v", ae.arg.PrevLogIndex, len(logs))
+			restartTimer(timer, r, lbTimer, ubTimer)
+			//log.Printf("In append: prevLogIndex %v, length of logs %v", ae.arg.PrevLogIndex, len(logs))
 			// reject if log doesn't match
 			if int64(len(logs)-1) <= ae.arg.PrevLogIndex-1 || (ae.arg.PrevLogIndex > 0 && logs[ae.arg.PrevLogIndex].Term != ae.arg.PrevLogTerm) {
 				log.Printf(
@@ -448,11 +459,11 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 					ae.arg.LeaderID,
 				)
 			} else {
-				log.Printf(
-					"In append: Heartbeat received from leader %v, follower %s, no response",
-					ae.arg.LeaderID,
-					id,
-				)
+				//log.Printf(
+				//	"In append: Heartbeat received from leader %v, follower %s, no response",
+				//	ae.arg.LeaderID,
+				//	id,
+				//)
 			}
 		case vr := <-raft.VoteChan:
 			// We received a RequestVote RPC from a raft peer
@@ -514,7 +525,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 					}
 					log.Printf("In election: prevLogIndex %v, length of log is %v", prevLogIndex, len(logs))
 					log.Printf("In election: NextIndex %v \n after %v elected", nextIndex, id)
-					restartTimer(timerHeartBeat, r, 1000, 2000)
+					restartTimer(timerHeartBeat, r, lbHeartBeat, ubHeartBeat)
 				}
 			}
 		case ar := <-appendResponseChan:

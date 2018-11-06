@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"time"
+	"reflect"
 
 	"google.golang.org/grpc"
 
@@ -16,6 +17,15 @@ import (
 )
 
 func main() {
+	p1 := pb.Result{Result:&pb.Result_Redirect{Redirect:&pb.Redirect{Server:"test"}}}
+	t1 := reflect.TypeOf(p1.Result)
+	fmt.Printf(t1.String())
+	p2 := pb.Result{Result: &pb.Result_Kv{Kv: &pb.KeyValue{Key: "1", Value: "1"}}}
+	t2 := reflect.TypeOf(p2.Result)
+	fmt.Printf(t2.String())
+	p3 := pb.Result{Result: &pb.Result_S{S: &pb.Success{}}}
+	t3 := reflect.TypeOf(p3.Result)
+	fmt.Printf(t3.String())
 	// Argument parsing
 	var r *rand.Rand
 	var seed int64
