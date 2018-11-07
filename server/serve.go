@@ -145,17 +145,16 @@ type VoteResponse struct {
 }
 
 func sendHeartBeat(peerClients map[string]pb.RaftClient, logs *[]*pb.Entry,
-	prevLogIndex *int64, prevLogTerm *int64, currentTerm *int64,
+	currentTerm *int64,
 	id *string, nextIndex *map[string]int64, commitIndex *int64,
 	appendResponseChan *chan AppendResponse) {
+	// the heartbeat has to be empty
 	for p, c := range peerClients {
 		go func(c pb.RaftClient, p string) {
 			// send heartbeats
-			*prevLogIndex = int64(len((*logs)) - 1)
-			log.Printf("In heartbeat: prevLogIndex %v, length of log is %v", *prevLogIndex, len(*logs))
+			//log.Printf("In heartbeat: prevLogIndex %v, length of log is %v", *prevLogIndex, len(*logs))
 			// if the log is empty
-			if len((*logs)) >= 1 {
-				*prevLogTerm = (*logs)[len((*logs))-1].Term
+			if len((*logs)) > 1 {
 				ret, err := c.AppendEntries(
 					context.Background(),
 					&pb.AppendEntriesArgs{
@@ -166,8 +165,7 @@ func sendHeartBeat(peerClients map[string]pb.RaftClient, logs *[]*pb.Entry,
 						Entries:      (*logs)[0:0],
 						LeaderCommit: *commitIndex,
 					})
-				// get response
-				log.Printf("HeatBeat sent from %v to %v", id, p)
+				//log.Printf("HeatBeat sent from %v to %v", id, p)
 				*appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
 			} else {
 				ret, err := c.AppendEntries(
@@ -180,8 +178,7 @@ func sendHeartBeat(peerClients map[string]pb.RaftClient, logs *[]*pb.Entry,
 						Entries:      (*logs)[0:0],
 						LeaderCommit: *commitIndex,
 					})
-				// get response
-				log.Printf("HeatBeat sent from %v to %v", id, p)
+				//log.Printf("HeatBeat sent from %v to %v", id, p)
 				*appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
 			}
 		}(c, p)
@@ -189,15 +186,10 @@ func sendHeartBeat(peerClients map[string]pb.RaftClient, logs *[]*pb.Entry,
 }
 
 func sendLogEntries(peerClients map[string]pb.RaftClient, peer *string, logs *[]*pb.Entry,
-	prevLogIndex *int64, prevLogTerm *int64, currentTerm *int64,
+	currentTerm *int64,
 	id *string, nextIndex *map[string]int64, commitIndex *int64,
 	appendResponseChan *chan AppendResponse) {
 	go func(c pb.RaftClient, p string) {
-		// send heartbeats
-		if len(*logs) >= 1 {
-			*prevLogIndex = int64(len(*logs) - 1)
-			*prevLogTerm = (*logs)[len(*logs)-1].Term
-		}
 		ret, err := c.AppendEntries(
 			context.Background(),
 			&pb.AppendEntriesArgs{
@@ -208,6 +200,8 @@ func sendLogEntries(peerClients map[string]pb.RaftClient, peer *string, logs *[]
 				Entries:      (*logs)[(*nextIndex)[p]:],
 				LeaderCommit: *commitIndex,
 			})
+		log.Printf("AppendEntries agiain request  sent from %v, PrevLogIndex %v, PrevLogTerm %v, Entries length %v, commitIndex",
+			id, (*nextIndex)[p]-1, (*logs)[(*nextIndex)[p]-1].Term, int64(len(*logs))-(*nextIndex)[p], *commitIndex)
 		// get response
 		*appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
 	}(peerClients[*peer], *peer)
@@ -220,13 +214,25 @@ func followerUpdate(term *int64, currentTerm *int64, role *Role, votedFor *strin
 	*voteCount = 0
 }
 
+func fakeCommand(i int) InputChannelType {
+	var command pb.Command
+	switch i {
+	case 1:
+		command = pb.Command{Operation: pb.Op_SET, Arg: &pb.Command_Set{Set: &pb.KeyValue{Key: "1", Value: "1"}}}
+	case 2:
+		command = pb.Command{Operation: pb.Op_GET, Arg: &pb.Command_Get{Get: &pb.Key{Key: "1"}}}
+	}
+	c := make(chan pb.Result)
+	return InputChannelType{command: command, response: c}
+}
+
 // The main service loop. All modifications to the KV store are run through here.
 func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 	// heartbeat lower and upper bound
-	lbHeartBeat :=  100
-	ubHeartBeat :=  200
-	lbTimer :=  1000
-	ubTimer :=  2000
+	lbHeartBeat := 100 / 2
+	ubHeartBeat := 200 / 2
+	lbTimer := 2000
+	ubTimer := 4000
 	// persistent server attributes
 	var currentTerm int64 = 0
 	var votedFor string = ""
@@ -246,11 +252,11 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 	var voteCount int64 = 0 // received votes counted
 	var majority int64 = 0  // majority votes
 	var headCount int64 = 1 // raft servers counted, self included
-	var prevLogIndex int64
-	var prevLogTerm int64
 	appendResponseChan := make(chan AppendResponse)
 	voteResponseChan := make(chan VoteResponse)
 	peerClients := make(map[string]pb.RaftClient)
+	// create a print timer to print heartbeat
+	//timerPrint := time.NewTimer()
 	// Create a timer and start running it
 	timer := time.NewTimer(randomDuration(r, lbTimer, ubTimer))
 	// heartbeat timer
@@ -259,6 +265,31 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 
 	// Start in a Go routine so it doesn't affect us.
 	go RunRaftServer(&raft, port)
+
+	// timer runs in parallel
+	go func() {
+		// send heartbeat periodically
+		for {
+			<-timerHeartBeat.C
+			if role == LEADER {
+				sendHeartBeat(peerClients, &logs, &currentTerm,
+					&id, &nextIndex, &commitIndex, &appendResponseChan)
+				restartTimer(timerHeartBeat, r, lbHeartBeat, ubHeartBeat)
+			} else {
+				timerHeartBeat.Stop()
+			}
+		}
+	}()
+
+	// tells the program still runs
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			log.Printf("ALIVE. The election timer %v, leader %v, log length %v",
+				timer.C, leaderID, len(logs),
+			)
+		}
+	}()
 
 	// Initialization
 	for _, peer := range *peers {
@@ -281,9 +312,6 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 		if role == LEADER {
 			// check nextIndex
 			log.Printf("In leader: nextIndex %v", nextIndex)
-			// send hearbeats
-			sendHeartBeat(peerClients, &logs, &prevLogIndex, &prevLogTerm, &currentTerm,
-				&id, &nextIndex, &commitIndex, &appendResponseChan)
 			// update commitIndex
 			if int64(len(logs)-1) > commitIndex {
 				for i := int64(1); i <= int64(len(logs)-1)-commitIndex; i++ {
@@ -304,23 +332,16 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 		}
 		// always check commit
 		if commitIndex > lastApplied {
+			log.Printf("In commit, id %v, commitIndex %v, lastApplied %v", id, commitIndex, lastApplied)
 			for i := int64(1); i <= commitIndex-lastApplied; i++ {
 				j := i + lastApplied
+				log.Printf("Committing... %v log %v %v", id, j, logs[j])
 				searchCommand(logs[j], ops, s)
 			}
 			lastApplied = commitIndex
 		}
 
 		select {
-		// send heartbeat periodically
-		case <-timerHeartBeat.C:
-			if role == LEADER {
-				sendHeartBeat(peerClients, &logs, &prevLogIndex, &prevLogTerm, &currentTerm,
-					&id, &nextIndex, &commitIndex, &appendResponseChan)
-				restartTimer(timerHeartBeat, r, lbHeartBeat, ubHeartBeat)
-			} else {
-				timerHeartBeat.Stop()
-			}
 		case <-timer.C:
 			// The timer went off.
 			log.Printf("Timeout")
@@ -365,6 +386,9 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				if len(logs) >= 1 {
 					lastLogIndex = int64(len(logs) - 1)
 					lastLogTerm = logs[len(logs)-1].Term
+				} else {
+					lastLogIndex = -1
+					lastLogTerm = 0
 				}
 				// add to local log
 				entry := &pb.Entry{
@@ -375,6 +399,8 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				logs = append(logs, entry)
 				// tell the other clients
 				for p, c := range peerClients {
+					log.Printf("ApeendEntries single request sent from %v to %v, PrevLogIndex %v, PrevLogTerm %v, Entries %v",
+						id, p, lastLogIndex, lastLogTerm, entry)
 					go func(c pb.RaftClient, p string) {
 						ret, err := c.AppendEntries(
 							context.Background(),
@@ -392,7 +418,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			} else {
 				// send redirect information
 				log.Printf("In client rquest, %v is redirected to leader %v", op.command, leaderID)
-				op.response <- pb.Result{Result:&pb.Result_Redirect{Redirect:&pb.Redirect{Server:leaderID}}}
+				op.response <- pb.Result{Result: &pb.Result_Redirect{Redirect: &pb.Redirect{Server: leaderID}}}
 			}
 		case ae := <-raft.AppendChan:
 			// We received an AppendEntries request from a Raft peer
@@ -407,8 +433,9 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			// reject if term is smaller, outdated
 			if ae.arg.Term < currentTerm {
 				log.Printf(
-					"AppendEntries request from %s rejected, term %v is smaller than %v",
+					"AppendEntries request from %s rejected by %v, term %v is smaller than %v",
 					ae.arg.LeaderID,
+					id,
 					ae.arg.Term,
 					currentTerm,
 				)
@@ -421,10 +448,12 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			// reject if log doesn't match
 			if int64(len(logs)-1) <= ae.arg.PrevLogIndex-1 || (ae.arg.PrevLogIndex > 0 && logs[ae.arg.PrevLogIndex].Term != ae.arg.PrevLogTerm) {
 				log.Printf(
-					"AppendEntries request from %s rejected, prevLogTerm %v doesn't match %v",
+					"AppendEntries request from %s rejected by %v, prevLogTerm %v at %v doesn't match or index beyond logs length %v)",
 					ae.arg.LeaderID,
+					id,
 					ae.arg.PrevLogTerm,
 					ae.arg.PrevLogIndex,
+					len(logs),
 				)
 				ae.response <- pb.AppendEntriesRet{Term: ae.arg.Term, Success: false}
 				continue
@@ -454,9 +483,11 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			if len(ae.arg.Entries) != 0 {
 				ae.response <- pb.AppendEntriesRet{Term: ae.arg.Term, Success: true}
 				log.Printf(
-					"AppendEntries consistency guaranteed between %v and leader %s",
+					"AppendEntries consistency guaranteed between %v and leader %s, log length %v, last term %v",
 					id,
 					ae.arg.LeaderID,
+					len(logs),
+					logs[len(logs)-1].Term,
 				)
 			} else {
 				//log.Printf(
@@ -509,22 +540,25 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				// adlready elected
 				if role == LEADER {
 					log.Printf("Already elected %v, term is %v", id, currentTerm)
+					sendHeartBeat(peerClients, &logs, &currentTerm,
+						&id, &nextIndex, &commitIndex, &appendResponseChan)
+					log.Printf("In election: HeatBeat sent from %v", id)
 					continue
 				}
 				// get elected
 				if voteCount >= majority {
-					log.Printf("ELECTED %v, term is %v", id, currentTerm)
+					log.Printf("ELECTED %v, term is %v, fake command sent", id, currentTerm)
+					go func() { s.C <- fakeCommand(1) }()
 					role = LEADER
 					// send heartbeat
-					sendHeartBeat(peerClients, &logs, &prevLogIndex, &prevLogTerm, &currentTerm,
+					sendHeartBeat(peerClients, &logs, &currentTerm,
 						&id, &nextIndex, &commitIndex, &appendResponseChan)
 					log.Printf("In election: HeatBeat sent from %v", id)
 					for p, _ := range peerClients {
 						// reinitialization of nextIndex upon new leader
 						nextIndex[p] = int64(len(logs))
 					}
-					log.Printf("In election: prevLogIndex %v, length of log is %v", prevLogIndex, len(logs))
-					log.Printf("In election: NextIndex %v \n after %v elected", nextIndex, id)
+					log.Printf("In election: NextIndex %v \n after %v elected, log length %v", nextIndex, id, len(logs))
 					restartTimer(timerHeartBeat, r, lbHeartBeat, ubHeartBeat)
 				}
 			}
@@ -558,9 +592,13 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			} else {
 				// fail trys again
 				// notice that when nextIndex reacher 0, replicate all the logs
-				nextIndex[ar.peer]--
+				if nextIndex[ar.peer] >= 1 {
+					nextIndex[ar.peer]--
+				} else {
+					log.Fatalf("The nextIndex of %v is 0 but still cannot match", ar.peer)
+				}
 				if len(logs) != 0 && int64(len(logs)-1) >= nextIndex[ar.peer] {
-					sendLogEntries(peerClients, &ar.peer, &logs, &prevLogIndex, &prevLogTerm, &currentTerm,
+					sendLogEntries(peerClients, &ar.peer, &logs, &currentTerm,
 						&id, &nextIndex, &commitIndex, &appendResponseChan)
 				}
 

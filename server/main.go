@@ -3,29 +3,27 @@ package main
 import (
 	"flag"
 	"fmt"
+	"google.golang.org/grpc"
 	"log"
-	rand "math/rand"
+	"math/rand"
 	"net"
 	"os"
 	"time"
-	"reflect"
-
-	"google.golang.org/grpc"
 
 	"github.com/nyu-distributed-systems-fa18/starter-code-lab2/pb"
 	//"pb"
 )
 
 func main() {
-	p1 := pb.Result{Result:&pb.Result_Redirect{Redirect:&pb.Redirect{Server:"test"}}}
-	t1 := reflect.TypeOf(p1.Result)
-	fmt.Printf(t1.String())
-	p2 := pb.Result{Result: &pb.Result_Kv{Kv: &pb.KeyValue{Key: "1", Value: "1"}}}
-	t2 := reflect.TypeOf(p2.Result)
-	fmt.Printf(t2.String())
-	p3 := pb.Result{Result: &pb.Result_S{S: &pb.Success{}}}
-	t3 := reflect.TypeOf(p3.Result)
-	fmt.Printf(t3.String())
+	//p1 := pb.Result{Result:&pb.Result_Redirect{Redirect:&pb.Redirect{Server:"test"}}}
+	//t1 := reflect.TypeOf(p1.Result)
+	//fmt.Printf(t1.String())
+	//p2 := pb.Result{Result: &pb.Result_Kv{Kv: &pb.KeyValue{Key: "1", Value: "1"}}}
+	//t2 := reflect.TypeOf(p2.Result)
+	//fmt.Printf(t2.String())
+	//p3 := pb.Result{Result: &pb.Result_S{S: &pb.Success{}}}
+	//t3 := reflect.TypeOf(p3.Result)
+	//fmt.Printf(t3.String())
 	// Argument parsing
 	var r *rand.Rand
 	var seed int64
@@ -71,6 +69,9 @@ func main() {
 
 	// Initialize KVStore
 	store := KVStore{C: make(chan InputChannelType), store: make(map[string]string)}
+	tmp := fakeCommand(1)
+	log.Printf("%v", tmp)
+	//store.C <- tmp
 	go serve(&store, r, &peers, id, raftPort)
 
 	// Tell GRPC that s will be serving requests for the KvStore service and should use store (defined on line 23)
