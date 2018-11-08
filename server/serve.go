@@ -458,9 +458,12 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			// TODO figure out what to do here, what we do is entirely wrong.
 			//log.Printf("AppendEntries request from leader %v received", ae.arg.LeaderID)
 			// things that have to be done anyway
+			if ae.arg.Term >= currentTerm {
+				leaderID = ae.arg.LeaderID
+			}
 			if ae.arg.Term > currentTerm {
 				followerUpdate(&ae.arg.Term, &currentTerm, &role, &votedFor, &voteCount)
-				leaderID = ae.arg.LeaderID
+				restartTimer(timer, r, lbTimer, ubTimer)
 				//log.Printf("AppendEntries request from new leader %v received", ae.arg.LeaderID)
 			}
 			// reject if term is smaller, outdated
@@ -553,6 +556,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			// TODO: Fix this.
 			if vr.arg.Term > currentTerm {
 				followerUpdate(&vr.arg.Term, &currentTerm, &role, &votedFor, &voteCount)
+				restartTimer(timer, r, lbTimer, ubTimer)
 				log.Printf("Vote Request from newer candidate %v received", vr.arg.CandidateID)
 			}
 			log.Printf("Vote Request from %v received ", vr.arg.CandidateID)
@@ -583,6 +587,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			}
 			if vr.ret.Term > currentTerm {
 				followerUpdate(&vr.ret.Term, &currentTerm, &role, &votedFor, &voteCount)
+				restartTimer(timer, r, lbTimer, ubTimer)
 				log.Printf("Vote Response from newer candidate %v term %v received", vr.peer, vr.ret.Term)
 				continue
 			}
@@ -606,6 +611,9 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 						log.Printf("ELECTED %v, term is %v", id, currentTerm)
 					}
 					role = LEADER
+					leaderID = id
+					// stop its own timer
+					timer.Stop()
 					// send heartbeat
 					sendHeartBeat(peerClients, &logs, &currentTerm,
 						&id, &nextIndex, &commitIndex, &appendResponseChan)
