@@ -13,6 +13,8 @@ import (
 	"github.com/nyu-distributed-systems-fa18/starter-code-lab2/pb"
 )
 
+var ifFakeCmds bool = false
+
 // Messages that can be passed from the Raft RPC server to the main loop for AppendEntries
 type AppendEntriesInput struct {
 	arg      *pb.AppendEntriesArgs
@@ -115,9 +117,13 @@ func searchCommand(e *pb.Entry, ops []*InputChannelType, s *KVStore) {
 		go s.HandleCommand(*ops[index])
 		// TODO: this is just temporary, waste the last channel
 		//log.Printf("Stuck here, after HandleCommand.")
-		res := <-(*ops[index]).response
-		// TODO: this is only approproate for set
-		log.Printf("Client got response key: \"%v\" value:\"%v\"", res.GetKv().Key, res.GetKv().Value)
+		if ifFakeCmds {
+			res := <-(*ops[index]).response
+			// TODO: this is only approproate for set
+			log.Printf("Client got response key: \"%v\" value:\"%v\"", res.GetKv().Key, res.GetKv().Value)
+		} else {
+			log.Printf("Client response sent: %v", *ops[index])
+		}
 		// delete the element without
 		ops[index] = ops[len(ops)-1]
 		ops = ops[:len(ops)-1]
@@ -253,6 +259,7 @@ func fakeCommand(i int, v int64) InputChannelType {
 
 // The main service loop. All modifications to the KV store are run through here.
 func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
+	// whether there is fake commands
 	// heartbeat lower and upper bound
 	lbHeartBeat := 100 / 2
 	ubHeartBeat := 200 / 2
@@ -592,8 +599,12 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				}
 				// get elected
 				if voteCount >= majority {
-					log.Printf("ELECTED %v, term is %v, fake command sent", id, currentTerm)
-					go func() { s.C <- fakeCommand(1, currentTerm) }()
+					if ifFakeCmds {
+						log.Printf("ELECTED %v, term is %v, fake command sent", id, currentTerm)
+						go func() { s.C <- fakeCommand(1, currentTerm) }()
+					} else {
+						log.Printf("ELECTED %v, term is %v", id, currentTerm)
+					}
 					role = LEADER
 					// send heartbeat
 					sendHeartBeat(peerClients, &logs, &currentTerm,
@@ -640,7 +651,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				if nextIndex[ar.peer] >= 1 {
 					nextIndex[ar.peer]--
 				} else {
-					log.Fatalf("The nextIndex of %v is 0 but still cannot match", ar.peer)
+					log.Printf("ERROR!! The nextIndex of %v is 0 but still cannot match", ar.peer)
 				}
 				if len(logs) != 0 && int64(len(logs)-1) >= nextIndex[ar.peer] {
 					sendLogEntries(peerClients, &ar.peer, &logs, &currentTerm,
