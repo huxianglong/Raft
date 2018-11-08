@@ -69,8 +69,8 @@ func main() {
 
 	// Initialize KVStore
 	store := KVStore{C: make(chan InputChannelType), store: make(map[string]string)}
-	tmp := fakeCommand(1)
-	log.Printf("%v", tmp)
+	//tmp := fakeCommand(1)
+	//log.Printf("%v", tmp)
 	//store.C <- tmp
 	go serve(&store, r, &peers, id, raftPort)
 

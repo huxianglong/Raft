@@ -110,7 +110,17 @@ func searchCommand(e *pb.Entry, ops []*InputChannelType, s *KVStore) {
 		}
 	}
 	if index != -1 {
-		s.HandleCommand(*ops[index])
+		//log.Printf("In searchCommand, response is %v",
+		//	(*ops[index]).response)
+		go s.HandleCommand(*ops[index])
+		// TODO: this is just temporary, waste the last channel
+		//log.Printf("Stuck here, after HandleCommand.")
+		res := <-(*ops[index]).response
+		// TODO: this is only approproate for set
+		log.Printf("Client got response key: \"%v\" value:\"%v\"", res.GetKv().Key, res.GetKv().Value)
+		// delete the element without
+		ops[index] = ops[len(ops)-1]
+		ops = ops[:len(ops)-1]
 	} else {
 		s.CommitLog(e)
 	}
@@ -154,33 +164,34 @@ func sendHeartBeat(peerClients map[string]pb.RaftClient, logs *[]*pb.Entry,
 			// send heartbeats
 			//log.Printf("In heartbeat: prevLogIndex %v, length of log is %v", *prevLogIndex, len(*logs))
 			// if the log is empty
-			if len((*logs)) > 1 {
-				ret, err := c.AppendEntries(
-					context.Background(),
-					&pb.AppendEntriesArgs{
-						Term:         *currentTerm,
-						LeaderID:     *id,
-						PrevLogIndex: (*nextIndex)[p] - 1,
-						PrevLogTerm:  (*logs)[(*nextIndex)[p]-1].Term,
-						Entries:      (*logs)[0:0],
-						LeaderCommit: *commitIndex,
-					})
-				//log.Printf("HeatBeat sent from %v to %v", id, p)
-				*appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
-			} else {
-				ret, err := c.AppendEntries(
-					context.Background(),
-					&pb.AppendEntriesArgs{
-						Term:         *currentTerm,
-						LeaderID:     *id,
-						PrevLogIndex: (*nextIndex)[p] - 1,
-						PrevLogTerm:  0,
-						Entries:      (*logs)[0:0],
-						LeaderCommit: *commitIndex,
-					})
-				//log.Printf("HeatBeat sent from %v to %v", id, p)
-				*appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
+			var prevIndex int64
+			var prevTerm int64
+			prevIndex = (*nextIndex)[p] - 1
+			if ((*nextIndex)[p] - 1) > int64(len(*logs)-1) {
+				log.Fatalf("In sendHeartBeat, nextIndex %v, log length %v", *nextIndex, len(*logs))
 			}
+			if len(*logs) >= 1 {
+				if (*nextIndex)[p] >= 1 {
+					prevTerm = (*logs)[(*nextIndex)[p]-1].Term
+				} else {
+					prevTerm = 0
+				}
+			} else {
+				prevTerm = 0
+			}
+			//log.Printf("log length %v, nextIndex %v", len(*logs), *nextIndex)
+			ret, err := c.AppendEntries(
+				context.Background(),
+				&pb.AppendEntriesArgs{
+					Term:         *currentTerm,
+					LeaderID:     *id,
+					PrevLogIndex: prevIndex,
+					PrevLogTerm:  prevTerm,
+					Entries:      (*logs)[0:0],
+					LeaderCommit: *commitIndex,
+				})
+			//log.Printf("HeatBeat sent from %v to %v", id, p)
+			*appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
 		}(c, p)
 	}
 }
@@ -190,18 +201,31 @@ func sendLogEntries(peerClients map[string]pb.RaftClient, peer *string, logs *[]
 	id *string, nextIndex *map[string]int64, commitIndex *int64,
 	appendResponseChan *chan AppendResponse) {
 	go func(c pb.RaftClient, p string) {
+		var prevTerm int64
+		prevIndex := (*nextIndex)[p] - 1
+		if ((*nextIndex)[p] - 1) > int64(len(*logs)-1) {
+			log.Fatalf("In sendLogEntries, nextIndex %v, log length %v", *nextIndex, len(*logs))
+		}
+		if (*nextIndex)[p] > 0 {
+			prevTerm = (*logs)[(*nextIndex)[p]-1].Term
+		} else {
+			prevTerm = int64(0)
+		}
 		ret, err := c.AppendEntries(
 			context.Background(),
 			&pb.AppendEntriesArgs{
 				Term:         *currentTerm,
 				LeaderID:     *id,
-				PrevLogIndex: (*nextIndex)[p] - 1,
-				PrevLogTerm:  (*logs)[(*nextIndex)[p]-1].Term,
+				PrevLogIndex: prevIndex,
+				PrevLogTerm:  prevTerm,
 				Entries:      (*logs)[(*nextIndex)[p]:],
 				LeaderCommit: *commitIndex,
 			})
-		log.Printf("AppendEntries agiain request  sent from %v, PrevLogIndex %v, PrevLogTerm %v, Entries length %v, commitIndex",
-			id, (*nextIndex)[p]-1, (*logs)[(*nextIndex)[p]-1].Term, int64(len(*logs))-(*nextIndex)[p], *commitIndex)
+		if prevIndex == int64(-1) && prevTerm != int64(0) {
+			log.Fatalf("In sendLogEntries, prevIndex is -1 but prevTerm is %v", prevTerm)
+		}
+		log.Printf("AppendEntries again request sent from %v, PrevLogIndex %v, PrevLogTerm %v, Entries length %v, commitIndex %v",
+			*id, prevIndex, prevTerm, int64(len(*logs))-(*nextIndex)[p], *commitIndex)
 		// get response
 		*appendResponseChan <- AppendResponse{ret: ret, err: err, peer: p}
 	}(peerClients[*peer], *peer)
@@ -214,11 +238,12 @@ func followerUpdate(term *int64, currentTerm *int64, role *Role, votedFor *strin
 	*voteCount = 0
 }
 
-func fakeCommand(i int) InputChannelType {
+func fakeCommand(i int, v int64) InputChannelType {
 	var command pb.Command
 	switch i {
 	case 1:
-		command = pb.Command{Operation: pb.Op_SET, Arg: &pb.Command_Set{Set: &pb.KeyValue{Key: "1", Value: "1"}}}
+		command = pb.Command{Operation: pb.Op_SET,
+			Arg: &pb.Command_Set{Set: &pb.KeyValue{Key: "1", Value: fmt.Sprintf("%v", v)}}}
 	case 2:
 		command = pb.Command{Operation: pb.Op_GET, Arg: &pb.Command_Get{Get: &pb.Key{Key: "1"}}}
 	}
@@ -244,8 +269,8 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 	var ops []*InputChannelType
 	var op InputChannelType
 	// volatile server attributes
-	var commitIndex int64 = 0
-	var lastApplied int64 = 0
+	var commitIndex int64 = -1
+	var lastApplied int64 = -1
 	var lastLogTerm int64 = 0
 	var lastLogIndex int64 = 0
 	var role = FOLLOWER
@@ -335,8 +360,9 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			log.Printf("In commit, id %v, commitIndex %v, lastApplied %v", id, commitIndex, lastApplied)
 			for i := int64(1); i <= commitIndex-lastApplied; i++ {
 				j := i + lastApplied
-				log.Printf("Committing... %v log %v %v", id, j, logs[j])
+				log.Printf("Committing... %v %v log %v %v", role, id, j, logs[j])
 				searchCommand(logs[j], ops, s)
+				log.Printf("Committed... %v %v log %v %v", role, id, j, logs[j])
 			}
 			lastApplied = commitIndex
 		}
@@ -446,17 +472,35 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			restartTimer(timer, r, lbTimer, ubTimer)
 			//log.Printf("In append: prevLogIndex %v, length of logs %v", ae.arg.PrevLogIndex, len(logs))
 			// reject if log doesn't match
-			if int64(len(logs)-1) <= ae.arg.PrevLogIndex-1 || (ae.arg.PrevLogIndex > 0 && logs[ae.arg.PrevLogIndex].Term != ae.arg.PrevLogTerm) {
-				log.Printf(
-					"AppendEntries request from %s rejected by %v, prevLogTerm %v at %v doesn't match or index beyond logs length %v)",
-					ae.arg.LeaderID,
-					id,
-					ae.arg.PrevLogTerm,
-					ae.arg.PrevLogIndex,
-					len(logs),
-				)
-				ae.response <- pb.AppendEntriesRet{Term: ae.arg.Term, Success: false}
-				continue
+			if ae.arg.PrevLogIndex >= 0 {
+				if int64(len(logs)-1) >= ae.arg.PrevLogIndex {
+					if logs[ae.arg.PrevLogIndex].Term != ae.arg.PrevLogTerm {
+						log.Printf(
+							"AppendEntries request from %s rejected by %v, prevLogTerm %v at %v doesn't match",
+							ae.arg.LeaderID,
+							id,
+							ae.arg.PrevLogTerm,
+							ae.arg.PrevLogIndex,
+							logs[ae.arg.PrevLogIndex].Term,
+						)
+						ae.response <- pb.AppendEntriesRet{Term: ae.arg.Term, Success: false}
+						continue
+					} else {
+						// copy entries
+					}
+				} else {
+					log.Printf(
+						"AppendEntries request from %s rejected by %v, prevLogIndex %v beyond last log index %v",
+						ae.arg.LeaderID,
+						id,
+						ae.arg.PrevLogIndex,
+						len(logs)-1,
+					)
+					ae.response <- pb.AppendEntriesRet{Term: ae.arg.Term, Success: false}
+					continue
+				}
+			} else {
+				// copy everything
 			}
 			// handle conflicts when log matches
 			// delete everything follows it
@@ -466,7 +510,8 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			} else {
 				for i := 1; i <= len(ae.arg.Entries); i++ {
 					j := int(ae.arg.PrevLogIndex) + i
-					if logs[j] == ae.arg.Entries[i] {
+					// index notice here
+					if logs[j] == ae.arg.Entries[i-1] {
 						continue
 					} else {
 						logs = logs[0 : ae.arg.PrevLogIndex+1]
@@ -548,7 +593,7 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 				// get elected
 				if voteCount >= majority {
 					log.Printf("ELECTED %v, term is %v, fake command sent", id, currentTerm)
-					go func() { s.C <- fakeCommand(1) }()
+					go func() { s.C <- fakeCommand(1, currentTerm) }()
 					role = LEADER
 					// send heartbeat
 					sendHeartBeat(peerClients, &logs, &currentTerm,

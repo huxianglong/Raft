@@ -111,8 +111,11 @@ func (s *KVStore) HandleCommand(op InputChannelType) {
 		op.response <- result
 	case pb.Op_SET:
 		arg := c.GetSet()
+		//log.Printf("In HandleCommand, response is %v", op.response)
 		result := s.SetInternal(arg.Key, arg.Value)
+		//log.Printf("Stuck here, in HandleCommand before response.")
 		op.response <- result
+		//log.Printf("Stuck here, in HandleCommand after response.")
 	case pb.Op_CLEAR:
 		result := s.ClearInternal()
 		op.response <- result
