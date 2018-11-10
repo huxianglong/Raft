@@ -380,6 +380,8 @@ func serve(s *KVStore, r *rand.Rand, peers *arrayPeers, id string, port int) {
 			log.Printf("Timeout")
 			// turn to candidate state
 			role = CANDIDATE
+			// clear the leader
+			leaderID = ""
 			// voted for myself first
 			votedFor = id
 			voteCount = 1
