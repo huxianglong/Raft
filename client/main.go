@@ -16,8 +16,8 @@ func usage() {
 	flag.PrintDefaults()
 }
 
-func reconnect(res *pb.Result, kvc *pb.KvStoreClient) {
-	endpoint := res.GetRedirect().Server
+func reconnect(res *pb.Result) pb.KvStoreClient {
+	endpoint := address[res.GetRedirect().Server]
 	log.Printf("Connecting to %v", endpoint)
 	// Connect to the server. We use WithInsecure since we do not configure https in this class.
 	conn, err := grpc.Dial(endpoint, grpc.WithInsecure())
@@ -26,10 +26,14 @@ func reconnect(res *pb.Result, kvc *pb.KvStoreClient) {
 		log.Fatalf("Failed to dial GRPC server %v", err)
 	}
 	log.Printf("Connected")
-	*kvc = pb.NewKvStoreClient(conn)
+	return pb.NewKvStoreClient(conn)
 }
 
+var address map[string]string
+
 func main() {
+	//address := map[string]string{"stretch:3002":"127.0.0.1:3002", "stretch:3004":"127.0.0.1:3004", "stretch:3006":"127.0.0.1:3006"}
+	address = map[string]string{"stretch:3002":"127.0.0.1:3001", "stretch:3004":"127.0.0.1:3003", "stretch:3006":"127.0.0.1:3005"}
 	// Take endpoint as input
 	flag.Usage = usage
 	flag.Parse()
@@ -56,7 +60,8 @@ func main() {
 	for {
 		if res.GetRedirect() != nil {
 			//if reflect.TypeOf(res.Result).String() == "*pb.Result_Redirect" {
-			reconnect(res, &kvc)
+			kvc = reconnect(res)
+			log.Printf("%v", kvc)
 			log.Printf("reconnected")
 			res, err = kvc.Clear(context.Background(), &pb.Empty{})
 		} else {
@@ -75,7 +80,7 @@ func main() {
 	for {
 		if res.GetRedirect() != nil {
 			//if reflect.TypeOf(res.Result).String() == "*pb.Result_Redirect" {
-			reconnect(res, &kvc)
+			reconnect(res)
 			log.Printf("reconnected")
 			res, err = kvc.Set(context.Background(), putReq)
 		} else {
@@ -97,7 +102,7 @@ func main() {
 	for {
 		if res.GetRedirect() != nil {
 			//if reflect.TypeOf(res.Result).String() == "*pb.Result_Redirect" {
-			reconnect(res, &kvc)
+			reconnect(res)
 			log.Printf("reconnected")
 			res, err = kvc.Get(context.Background(), req)
 		} else {
@@ -119,7 +124,7 @@ func main() {
 	for {
 		if res.GetRedirect() != nil {
 			//if reflect.TypeOf(res.Result).String() == "*pb.Result_Redirect" {
-			reconnect(res, &kvc)
+			reconnect(res)
 			log.Printf("reconnected")
 			res, err = kvc.CAS(context.Background(), casReq)
 		} else {
@@ -141,7 +146,7 @@ func main() {
 	for {
 		if res.GetRedirect() != nil {
 			//if reflect.TypeOf(res.Result).String() == "*pb.Result_Redirect" {
-			reconnect(res, &kvc)
+			reconnect(res)
 			log.Printf("reconnected")
 			res, err = kvc.CAS(context.Background(), casReq)
 		} else {
@@ -163,7 +168,7 @@ func main() {
 	for {
 		if res.GetRedirect() != nil {
 			//if reflect.TypeOf(res.Result).String() == "*pb.Result_Redirect" {
-			reconnect(res, &kvc)
+			reconnect(res)
 			log.Printf("reconnected")
 			res, err = kvc.CAS(context.Background(), casReq)
 		} else {
